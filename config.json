@@ -330,18 +330,6 @@
     800,
     8000
    ]
-  },
-  {
-   "id": "sh600519",
-   "name": "贵州茅台",
-   "group": "自选",
-   "source": "tencent",
-   "class": "stock",
-   "tz": "Asia/Shanghai",
-   "expected_range": [
-    1000,
-    2500
-   ]
   }
  ],
  "watch_assets": [
