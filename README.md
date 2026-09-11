@@ -100,11 +100,11 @@ launchctl kickstart gui/$(id -u)/com.vz.asset-monitor   # 立即触发一轮
 launchctl bootout gui/$(id -u)/com.vz.asset-monitor     # 停用
 ```
 
-## 自定义（都在 config.json）
+## 自定义（都在 config.json，可在手机端网页改）
 
-- **加自选股/基金**：往 `watchlist` 数组加一行，腾讯代码，如
+- **加自选股/基金**：手机 edit.html 一键添加（见上节），或在 `assets` 数组加一行，如
   `{"id": "sh600519", "name": "贵州茅台", "group": "自选", "source": "tencent", "class": "stock", "tz": "Asia/Shanghai", "expected_range": [1000, 2500]}`
-- **删资产**：从 `assets` 删对应行即可
+- **删资产**：手机 edit.html 点删除，或从 `assets` 删对应行
 - **调灵敏度**：`thresholds_class` 各档阈值（调前先跑 backtest --sweep 看触发密度）
 - **日报开关**：`daily_digest: false`
 - `expected_range` 是防呆护栏：接口异常返回离谱价格时自动报"数据异常"而不是发假提醒
@@ -137,12 +137,24 @@ launchctl bootout gui/$(id -u)/com.vz.asset-monitor     # 停用
 | `backtest-report.md` | 最近一次回测报告 |
 | `com.vz.asset-monitor.plist` | launchd 定义（已装至 ~/Library/LaunchAgents/） |
 
+## 手机一键增删资产（已上线）
+
+看板页头点 **⚙️ 管理资产**，或直接打开
+**https://vilaz123.github.io/asset-monitor/edit.html**
+
+- 选中资产点删除 / 填代码点添加（支持快捷模板、代码格式校验）
+- 提交 → 写入 GitHub 仓库的 `config.json` → Mac 下一轮运行自动 `git pull` 生效（≤30分钟）
+- 引擎侧双重防护：远端 config 结构校验失败则拒绝合并不影响监控；代码填错的资产只会在看板显示"数据异常"，删掉即可
+
+**首次使用需配一次 GitHub 令牌**（浏览器存本机，只授权这一个仓库）：
+github.com/settings/personal-access-tokens/new → Repository access 选 *Only select repositories → asset-monitor* → Permissions → Contents → *Read and write* → 生成后粘贴进页面。
+
 ## 云端看板（GitHub Pages，已上线）
 
 每轮运行后自动把 `dashboard.html` 推到 [vilaz123/asset-monitor](https://github.com/vilaz123/asset-monitor)
 的 `gh-pages` 分支，手机可打开：**https://vilaz123.github.io/asset-monitor/**
 
-- 仓库**只含 index.html + README**；`config.json`（含 SendKey）、`state.json` 永远不出本机
+- 仓库 main 分支 = 引擎 + 公开 config.json + edit.html；**`secrets.json`（含 SendKey）和 `state.json` 被 gitignore，永远不出本机**（load_config 自动叠加 secrets 的渠道配置）
 - 提交身份用 GitHub noreply 邮箱（仓库级 git config），不暴露真实邮箱
 - 公开仓库 + gh-pages 分支 = Pages 自动激活，无需 API/gh 登录；推送走本机 SSH key
 - 内容无变化时跳过提交；推送失败只记日志，不影响本地监控与通知
