@@ -1,0 +1,11 @@
+state.json
+state.json.bak
+state.json.tmp
+secrets.json
+dashboard.html
+backtest-report.md
+bt.md
+__pycache__/
+*.pyc
+.DS_Store
+state.lock
