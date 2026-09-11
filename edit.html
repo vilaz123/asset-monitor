@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<title>资产管理 · asset-monitor</title>
+<style>
+:root{
+  --surface:#fcfcfb; --card:#ffffff; --ink:#1c1c1b; --ink2:#6e6e6a; --muted:#a8a8a2;
+  --line:#2a78d6; --bg2:#f2f4f7; --danger:#d03b3b; --ok:#2e9e5b; --bd:#e6e6e0;
+}
+@media (prefers-color-scheme: dark){
+  :root{ --surface:#1a1a19; --card:#242423; --ink:#ececea; --ink2:#a3a39d; --muted:#6d6d67;
+         --line:#5ea1ea; --bg2:#2c2c2a; --danger:#e06060; --ok:#4dbd7e; --bd:#3a3a37; }
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--surface);color:var(--ink);
+  font:-apple-system,"PingFang SC","Helvetica Neue",sans-serif;
+  max-width:640px;margin:0 auto;padding:14px 14px 60px;line-height:1.5}
+a{color:var(--line);text-decoration:none}
+h1{font-size:19px;margin:4px 0 2px}
+.sub{color:var(--ink2);font-size:12.5px;margin-bottom:14px}
+section{background:var(--card);border:1px solid var(--bd);border-radius:12px;
+  padding:14px;margin-bottom:14px}
+h2{font-size:14.5px;margin-bottom:10px}
+.row{display:flex;align-items:center;justify-content:space-between;
+  padding:9px 2px;border-bottom:1px solid var(--bd);gap:8px}
+.row:last-child{border-bottom:none}
+.row .nm{font-size:14px;font-weight:600}
+.row .meta{color:var(--ink2);font-size:11.5px;margin-top:1px}
+.btn{border:1px solid var(--bd);background:var(--bg2);color:var(--ink);
+  border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer;white-space:nowrap}
+.btn:active{transform:scale(.97)}
+.btn.del{color:var(--danger);border-color:var(--danger);opacity:.75;padding:4px 10px}
+.btn.pri{background:var(--line);border-color:var(--line);color:#fff;font-weight:600}
+.btn:disabled{opacity:.4;cursor:default}
+label{font-size:12px;color:var(--ink2);display:block;margin:9px 0 4px}
+input,select{width:100%;padding:9px 10px;border:1px solid var(--bd);border-radius:8px;
+  background:var(--surface);color:var(--ink);font-size:14px}
+input:focus,select:focus{outline:2px solid var(--line);outline-offset:-1px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.hint{font-size:11.5px;color:var(--muted);margin-top:5px}
+.chips{display:flex;flex-wrap:wrap;gap:7px;margin:6px 0 2px}
+.chip{border:1px dashed var(--bd);border-radius:999px;padding:4px 11px;
+  font-size:12.5px;cursor:pointer;color:var(--ink2)}
+.msg{border-radius:8px;padding:9px 12px;font-size:13px;margin-top:10px;display:none}
+.msg.err{background:color-mix(in srgb,var(--danger) 12%,transparent);color:var(--danger);display:block}
+.msg.ok{background:color-mix(in srgb,var(--ok) 13%,transparent);color:var(--ok);display:block}
+.pat{font-size:12px;color:var(--ink2);background:var(--bg2);border-radius:8px;
+  padding:9px 11px;margin-top:8px}
+kbd{background:var(--bg2);border:1px solid var(--bd);border-radius:4px;
+  padding:0 5px;font-size:11px}
+.tag{font-size:10.5px;color:var(--muted);border:1px solid var(--bd);
+  border-radius:4px;padding:0 5px;margin-left:6px;vertical-align:1px}
+#lock section.cfg{display:none}
+#lock.on section.cfg{display:block}
+</style>
+</head>
+<body id="lock">
+
+<h1>⚙️ 资产管理</h1>
+<div class="sub">增删监控资产 → 提交到 GitHub → Mac 下轮运行自动生效（约30分钟内）·
+<a href="index.html">← 返回看板</a></div>
+
+<section id="pat-sec">
+  <h2>🔑 GitHub 令牌（首次配置，之后免登录）</h2>
+  <div class="pat">电脑打开 <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">github.com/settings/personal-access-tokens/new</a>：<br>
+  ① Repository access 选 <b>Only select repositories → asset-monitor</b><br>
+  ② Permissions → Repository permissions → <b>Contents → Read and write</b><br>
+  ③ Generate → 复制令牌粘贴到下面。令牌只存本机浏览器（localStorage），只授权这一个仓库。</div>
+  <label>Fine-grained token（github_pat_ 开头）</label>
+  <input id="pat" type="password" placeholder="github_pat_…" autocomplete="off">
+  <div style="margin-top:9px;display:flex;gap:8px">
+    <button class="btn pri" onclick="savePat()">保存令牌并加载</button>
+    <button class="btn" onclick="clearPat()">清除</button>
+  </div>
+</section>
+
+<section class="cfg">
+  <h2>📊 当前资产（<span id="cnt">–</span>）</h2>
+  <div id="list">加载中…</div>
+  <div class="msg" id="list-msg"></div>
+</section>
+
+<section class="cfg">
+  <h2>➕ 添加资产</h2>
+  <div class="chips" id="presets"></div>
+  <div class="grid2">
+    <div><label>腾讯代码 *</label><input id="f-id" placeholder="sh600519 / hk00700 / usAAPL.OQ">
+      <div class="hint">A股 sh/sz + 6位 · 港股 hk + 5位 · 美股 us + 代码.交易所</div></div>
+    <div><label>名称 *</label><input id="f-name" placeholder="贵州茅台"></div>
+    <div><label>分组</label>
+      <select id="f-group"></select></div>
+    <div><label>阈值档</label>
+      <select id="f-class">
+        <option value="index">指数（回撤20%）</option>
+        <option value="stock">个股（回撤25%）</option>
+        <option value="gold">黄金（12%）</option>
+        <option value="silver">白银（25%）</option>
+        <option value="oil">原油（30%）</option>
+        <option value="crypto">BTC（35%）</option>
+        <option value="eth">ETH（40%）</option>
+      </select></div>
+    <div><label>价格下限（防呆，可空）</label><input id="f-lo" type="number" step="any" placeholder="如 1000"></div>
+    <div><label>价格上限（可空）</label><input id="f-hi" type="number" step="any" placeholder="如 2500"></div>
+  </div>
+  <div class="hint">加密货币不用上面格式，代码填 <kbd>BTC_USDT</kbd> / <kbd>ETH_USDT</kbd> 即可，阈值档选对应币种。</div>
+  <div style="margin-top:11px"><button class="btn pri" id="add-btn" onclick="addAsset()">添加到列表</button></div>
+  <div class="msg" id="add-msg"></div>
+</section>
+
+<section class="cfg">
+  <h2>💾 提交修改</h2>
+  <div class="hint" style="margin:0 0 9px">提交后 Mac 下一轮运行（≤30分钟）自动拉取生效；<br>
+  代码填错不会弄坏监控——该资产在看板显示"数据异常"，回这里删掉即可。</div>
+  <button class="btn pri" style="width:100%;padding:11px" id="save-btn" onclick="save()">保存并提交到 GitHub</button>
+  <div class="msg" id="save-msg"></div>
+</section>
+
+<script>
+"use strict";
+const REPO = "vilaz123/asset-monitor";
+const API = "https://api.github.com/repos/" + REPO + "/contents/config.json?ref=main";
+let cfg = null, sha = null, changed = false;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+
+function pat() { return localStorage.getItem("ghpat") || ""; }
+function savePat() {
+  const v = $("pat").value.trim();
+  if (!v.startsWith("github_pat_") && !v.startsWith("ghp_")) { flash("list-msg", "令牌应以 github_pat_ 或 ghp_ 开头", "err"); return; }
+  localStorage.setItem("ghpat", v); boot();
+}
+function clearPat() { localStorage.removeItem("ghpat"); location.reload(); }
+function authed() { return !!pat(); }
+
+function flash(id, text, cls) {
+  const el = $(id); el.className = "msg " + (cls || "ok"); el.textContent = text;
+}
+async function gh(method, body) {
+  const h = { "Accept": "application/vnd.github+json" };
+  if (pat()) h["Authorization"] = "Bearer " + pat();
+  const r = await fetch(method === "GET" ? API : API.replace("?ref=main", ""), {
+    method, headers: h, body: body ? JSON.stringify(body) : undefined });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.message || ("HTTP " + r.status)));
+  return j;
+}
+const b64d = s => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/\n/g, "")), c => c.charCodeAt(0)));
+const b64e = s => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+
+async function load() {
+  const j = await gh("GET");
+  sha = j.sha; cfg = JSON.parse(b64d(j.content));
+  changed = false; render();
+}
+function render() {
+  $("cnt").textContent = cfg.assets.length + " 信号 + " + (cfg.watch_assets || []).length + " 观察";
+  $("list").innerHTML = cfg.assets.map((a, i) =>
+    '<div class="row"><div><div class="nm">' + esc(a.name) +
+    '<span class="tag">' + esc(a.id) + "</span></div>" +
+    '<div class="meta">' + esc(a.group || "") + " · " + esc(a.class) + "</div></div>" +
+    '<button class="btn del" onclick="delAsset(' + i + ')">删除</button></div>'
+  ).join("") || '<div class="hint">（空）</div>';
+  const gs = [...new Set(cfg.assets.map(a => a.group || "其他"))];
+  $("f-group").innerHTML = gs.map(g => '<option value="' + esc(g) + '">' + esc(g) + "</option>").join("") +
+    '<option value="自选">自选（新建）</option>';
+  $("save-btn").disabled = !changed;
+  $("save-btn").textContent = changed ? "保存并提交到 GitHub" : "无改动";
+}
+function tzOf(id) {
+  if (/^sh|^sz/.test(id)) return "Asia/Shanghai";
+  if (/^hk/.test(id)) return "Asia/Hong_Kong";
+  if (/^us/.test(id)) return "America/New_York";
+  return "UTC";
+}
+function validId(id) {
+  return /^(sh|sz)[0-9]{6}$/.test(id) || /^hk[0-9]{5}$/.test(id) ||
+         /^us[A-Za-z0-9]+(\.[A-Z]{1,2})?$/.test(id) || /^[A-Z]+_USDT$/.test(id);
+}
+const PRESETS = [
+  ["sh600519", "贵州茅台", "自选", "stock"],
+  ["sh601318", "中国平安", "自选", "stock"],
+  ["hk00700", "腾讯控股", "港股", "stock"],
+  ["usAAPL.OQ", "苹果", "美股", "stock"],
+  ["usNVDA.OQ", "英伟达", "美股", "stock"],
+];
+$("presets").innerHTML = PRESETS.map((p, i) =>
+  '<span class="chip" onclick="usePreset(' + i + ')">+ ' + p[1] + "</span>").join("");
+function usePreset(i) {
+  const p = PRESETS[i];
+  $("f-id").value = p[0]; $("f-name").value = p[1];
+  [...$("f-group").options].forEach(o => { if (o.value === p[2]) o.selected = true; });
+  $("f-class").value = p[3]; $("add-msg").className = "msg";
+}
+function addAsset() {
+  const id = $("f-id").value.trim(), name = $("f-name").value.trim();
+  if (!validId(id)) { flash("add-msg", "代码格式不对：" + id + "（示例 sh600519 / hk00700 / usAAPL.OQ / BTC_USDT）", "err"); return; }
+  if (!name) { flash("add-msg", "名称必填", "err"); return; }
+  if (cfg.assets.some(a => a.id === id)) { flash("add-msg", "已在列表中：" + id, "err"); return; }
+  const a = {
+    id, name, group: $("f-group").value, class: $("f-class").value, tz: tzOf(id),
+    source: /_USDT$/.test(id) ? "gateio" : "tencent",
+  };
+  const lo = parseFloat($("f-lo").value), hi = parseFloat($("f-hi").value);
+  if ($("f-lo").value !== "" && $("f-hi").value !== "" && isFinite(lo) && isFinite(hi)) a.expected_range = [lo, hi];
+  cfg.assets.push(a); changed = true; render();
+  $("f-id").value = $("f-name").value = $("f-lo").value = $("f-hi").value = "";
+  flash("add-msg", "已加入列表（还没提交，记得拉到底部点保存）");
+}
+function delAsset(i) {
+  const a = cfg.assets[i];
+  if (!confirm("删除 " + a.name + "（" + a.id + "）？")) return;
+  cfg.assets.splice(i, 1); changed = true; render();
+}
+async function save() {
+  if (!changed) return;
+  $("save-btn").disabled = true; $("save-btn").textContent = "提交中…";
+  try {
+    const j = await gh("PUT", {
+      message: "edit: 资产增删（网页） assets=" + cfg.assets.length,
+      content: b64e(JSON.stringify(cfg, null, 1)), sha, branch: "main",
+    });
+    sha = j.content.sha; changed = false; render();
+    flash("save-msg", "✅ 已提交。Mac 下轮运行（≤30分钟）自动生效，看板刷新即可看到。");
+  } catch (e) {
+    const m = String(e.message || e);
+    flash("save-msg", /conflict|409/i.test(m) ? "配置刚被别处更新过，请刷新页面重新操作" : "提交失败：" + m, "err");
+    $("save-btn").disabled = false; $("save-btn").textContent = "保存并提交到 GitHub";
+  }
+}
+async function boot() {
+  if (!authed()) { $("pat-sec").style.display = "block"; return; }
+  $("lock").classList.add("on"); $("pat-sec").style.display = "none";
+  try { await load(); }
+  catch (e) {
+    flash("list-msg", "加载失败：" + (e.message || e) + "（令牌无效或过期？清除后重填）", "err");
+    $("pat-sec").style.display = "block";
+  }
+}
+boot();
+</script>
+</body>
+</html>
