@@ -391,6 +391,69 @@ def fetch_gateio_kline(pair, n=800, from_ts=None, to_ts=None):
 EM_HOSTS = ["push2.eastmoney.com", "push2delay.eastmoney.com"]  # 主域偶发整体失效，镜像兜底
 
 
+def em_api(path, retries=2):
+    """东财 push2 API 通用入口：双主机×重试（主域会随机掐连接）。"""
+    last = None
+    for _ in range(retries):
+        for host in EM_HOSTS:
+            try:
+                return http_get("https://%s%s" % (host, path))
+            except Exception as e:
+                last = e
+        time.sleep(1)
+    raise RuntimeError("eastmoney api 失败: %s" % last)
+
+
+def fetch_eastmoney_flow(secid, days=20):
+    """东财日级主力资金流。klines 列：日期,主力,小单,中单,大单,超大单(净额,元),
+    主力%,小%,中%,大%,超大%,收盘,涨跌幅,…；最后一根为当日盘中实时值。
+    历史在 push2his（本网络不可达，每轮仍先试，恢复即自动补全）；
+    兜底走 push2 当日快照(仅1行)，历史由 state 按日积累。返回行(旧→新)。"""
+    hosts = ["push2his.eastmoney.com"] + EM_HOSTS
+    for host in hosts:
+        try:
+            d = (http_get("https://%s/api/qt/stock/fflow/daykline/get?lmt=0&klt=101"
+                          "&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,"
+                          "f60,f61,f62,f63,f64,f65&secid=%s" % (host, secid), timeout=8)
+                 .get("data") or {})
+            rows = []
+            for k in d.get("klines") or []:
+                p = k.split(",")
+                try:
+                    rows.append({"date": p[0], "main": float(p[1]), "main_pct": float(p[6])})
+                except (ValueError, IndexError):
+                    continue
+            if rows:
+                return rows[-days:]
+        except Exception:
+            continue
+    return []
+
+
+def fetch_eastmoney_industries():
+    """东财行业板块行情(约400+细分级)，按涨跌幅降序。字段 f3涨跌% f62主力净额
+    f104/f105 涨/跌家数 f128 领涨股。返回 [{"n","c","m","u","d","l"}]。"""
+    seen, out = set(), []
+    for pn in (1, 2, 3, 4, 5):
+        d = (em_api("/api/qt/clist/get?pn=%d&pz=100&po=1&np=1&fltt=2&invt=2&fid=f3"
+                    "&fs=m:90+t:2+f:!50&fields=f12,f14,f3,f62,f104,f105,f128" % pn)
+             .get("data") or {})
+        diff = d.get("diff") or []
+        if not diff:
+            break
+        for x in diff:
+            nm = x.get("f14")
+            if not nm or nm in seen:
+                continue
+            seen.add(nm)
+            out.append({"n": nm, "c": x.get("f3"), "m": x.get("f62"),
+                        "u": x.get("f104"), "d": x.get("f105"), "l": x.get("f128")})
+        time.sleep(0.15)
+    out = [b for b in out if isinstance(b["c"], (int, float))]
+    out.sort(key=lambda b: -b["c"])
+    return out
+
+
 def fetch_eastmoney_rt(secid):
     last_err = None
     for host in EM_HOSTS:
@@ -705,8 +768,29 @@ def compute_tech(bars):
         elif out["vol_ratio"] <= 0.7:
             vol_label = "缩量"
 
-    out["labels"] = [x for x in (trend, macd_label, kdj_label, boll_label, vol_label) if x] \
-        + out["labels"]
+    # --- 成交量分析：量价配合 / OBV方向 / 多空量能比 / 中期量能 ---
+    pq_label = obv_label = None
+    if n >= 21 and vols[-1] > 0 and vols[-2] > 0:
+        r1d = vols[-1] / vols[-2]
+        if closes[-1] > closes[-2]:
+            pq_label = "量价齐升" if r1d >= 1.1 else "缩量上涨"
+        elif closes[-1] < closes[-2]:
+            pq_label = "放量下跌" if r1d >= 1.1 else "缩量下跌"
+        out["pq"] = pq_label
+        out["pq_vol"] = round(r1d, 2)
+        obv20 = sum((1 if closes[i] > closes[i - 1] else -1 if closes[i] < closes[i - 1] else 0) * vols[i]
+                    for i in range(n - 20, n))
+        out["obv20_up"] = obv20 > 0
+        obv_label = "OBV上行" if obv20 > 0 else ("OBV下行" if obv20 < 0 else None)
+        upv = [vols[i] for i in range(n - 20, n) if closes[i] > closes[i - 1]]
+        dnv = [vols[i] for i in range(n - 20, n) if closes[i] < closes[i - 1]]
+        if upv and dnv and sum(dnv) > 0:
+            out["bull_bear_vol"] = round((sum(upv) / len(upv)) / (sum(dnv) / len(dnv)), 2)
+    if n >= 60 and sum(vols[-60:]) > 0:
+        out["vol_5_60"] = round((sum(vols[-5:]) / 5.0) / (sum(vols[-60:]) / 60.0), 2)
+
+    out["labels"] = [x for x in (trend, macd_label, kdj_label, boll_label, vol_label,
+                                 pq_label, obv_label) if x] + out["labels"]
     return out
 
 
@@ -1024,7 +1108,7 @@ def compose_low_message(alerts, total, stale_infos, now):
     return title[:32], body
 
 
-def compose_digest(reports, now, link=None):
+def compose_digest(reports, now, link=None, market=None):
     """每日水位日报。Server酱(微信)会把单个\n折叠成空格，段落间必须用\n\n，
     行级内容用 markdown 列表项才能逐行显示。"""
     groups = {"low": [], "near": [], "other": []}
@@ -1045,6 +1129,13 @@ def compose_digest(reports, now, link=None):
             fmt_pct(i["dd"]), fmt_pct(i["pct3y"]), vtag)
 
     parts = ["## 📊 资产水位日报 %s" % now.strftime("%m-%d")]
+    if market:
+        ups = [b for b in market if b["c"] > 0][:3]
+        dns = [b for b in market if b["c"] < 0][-3:][::-1]
+        if ups or dns:
+            parts.append("\n**🏭 行业板块**\n\n- 领涨: %s\n- 领跌: %s" % (
+                "、".join("%s%+.1f%%" % (b["n"], b["c"]) for b in ups) or "-",
+                "、".join("%s%+.1f%%" % (b["n"], b["c"]) for b in dns) or "-"))
     for key, head in (("low", "🔵 低水位"), ("near", "🟡 接近低位"), ("other", "⚪ 其余")):
         if not groups[key]:
             continue
@@ -1098,6 +1189,64 @@ def cond_grid(ind, conds):
     return '<div class="conds">%s</div>' % "".join(cells)
 
 
+def fmt_yi(v):
+    """主力净额(元)格式化：亿/万。"""
+    if v is None:
+        return "-"
+    s = v / 1e8
+    if abs(s) >= 1:
+        return "%+.1f亿" % s
+    return "%+d万" % round(v / 1e4)
+
+
+def flow_line(st):
+    """卡片资金流行：主力 今日/5日 净额（红流入绿流出，A股惯例）。"""
+    f = st.get("flow")
+    if not f:
+        return ""
+    d5 = f.get("d5")
+    d5n = f.get("d5_days")
+    d5_lab = "5日%s" % fmt_yi(d5) if d5n is None or d5n >= 5 else "5日累计中%s(%d/5)" % (fmt_yi(d5), d5n)
+    cls = "up" if (d5 or 0) >= 0 else "dn"
+    return ('<div class="flow %s">主力 今日%s · %s<span class="fl-date">%s</span></div>'
+            % (cls, fmt_yi(f.get("today")), d5_lab, htmlesc(f.get("date") or "")))
+
+
+def heat_tile(b, big=False):
+    c = b["c"] or 0
+    a = min(abs(c) / 4.0, 1.0) * 0.55 + 0.12
+    tip = "%s · 涨%s/跌%s · 领涨%s · 主力%s" % (
+        b["n"], b.get("u"), b.get("d"), b.get("l") or "-", fmt_yi(b.get("m")))
+    inner = "<b>%s</b><i>%+.2f%%</i>" % (htmlesc(b["n"]), c)
+    if big:
+        inner += "<em>主力%s</em>" % fmt_yi(b.get("m"))
+    return ('<div class="htile %s%s" style="--a:%.2f" title="%s">%s</div>'
+            % ("h-up" if c >= 0 else "h-dn", " big" if big else "", a, tip, inner))
+
+
+def market_section(state):
+    """行业板块热力图：露头的是领涨/领跌TOP15大砖块，全量板块折叠。"""
+    mk = state.get("market") or {}
+    inds = mk.get("industries") or []
+    if not inds:
+        return ""
+    ups = [b for b in inds if b["c"] > 0][:15]
+    dns = [b for b in inds if b["c"] < 0][-15:][::-1]
+    when = (mk.get("ts") or "")[5:16].replace("T", " ")
+    html = ['<section class="heatbox"><h2>行业板块热力图'
+            '<span class="hsub">%s · %d个板块 · 红涨绿跌 · 深浅=涨跌幅度</span></h2>' % (
+                htmlesc(when), len(inds))]
+    if ups:
+        html.append('<div class="hgrid big">%s</div>' % "".join(heat_tile(b, True) for b in ups))
+    if dns:
+        html.append('<div class="hgrid big dn-row">%s</div>' % "".join(heat_tile(b, True) for b in dns))
+    html.append('<details class="tech"><summary>全部 %d 个板块热力图</summary>'
+                '<div class="hgrid">%s</div></details>'
+                % (len(inds), "".join(heat_tile(b) for b in inds)))
+    html.append("</section>")
+    return "".join(html)
+
+
 def tech_details(st):
     """卡片内可展开的技术分析区(<details>，默认收起保持网格整齐)。"""
     t = st.get("tech") or {}
@@ -1123,7 +1272,27 @@ def tech_details(st):
         return "%s%%/日（年化约%.0f%%）" % (t["atr_pct"], t["atr_pct"] * (252 ** 0.5))
 
     def vol_txt():
-        return "×%s" % t["vol_ratio"] if t.get("vol_ratio") is not None else "-"
+        parts = ["×%s" % t["vol_ratio"]] if t.get("vol_ratio") is not None else []
+        if t.get("pq"):
+            v = "（昨量%.1f×）" % t["pq_vol"] if t.get("pq_vol") is not None else ""
+            parts.append("%s%s" % (t["pq"], v))
+        if t.get("obv20_up") is not None:
+            parts.append("OBV%s" % ("上行" if t["obv20_up"] else "下行"))
+        if t.get("bull_bear_vol") is not None:
+            parts.append("多空量比%s（>1.2多方/<0.8空方）" % t["bull_bear_vol"])
+        if t.get("vol_5_60") is not None:
+            parts.append("5/60日量×%s" % t["vol_5_60"])
+        return " · ".join(parts) or "-"
+
+    def flow_txt():
+        f = st.get("flow")
+        if not f:
+            return "无数据（非A股或接口失败）"
+        d5n = f.get("d5_days")
+        d5_lab = fmt_yi(f.get("d5")) if d5n is None or d5n >= 5 else \
+            "%s（累计中 %d/5 日，自动补全）" % (fmt_yi(f.get("d5")), d5n)
+        return "今日主力净流入 %s（占比%s%%）· 5日 %s" % (
+            fmt_yi(f.get("today")), f.get("today_pct"), d5_lab)
 
     def mom_txt():
         return "%s / %s" % (fmt_pct(t.get("ret20"), True), fmt_pct(t.get("ret60"), True))
@@ -1149,6 +1318,7 @@ def tech_details(st):
         ("52周", pos_txt()),
         ("波动", "ATR14 %s" % atr_txt()),
         ("量能", "5日/20日 %s" % vol_txt()),
+        ("主力资金", flow_txt()),
     ]
     trs = "".join("<tr><td>%s</td><td>%s</td></tr>" % (k, htmlesc(v)) for k, v in rows)
     return ('<details class="tech"><summary>技术分析 %s</summary>'
@@ -1213,6 +1383,7 @@ def asset_card(asset, st, is_watch=False):
         body.append(water_meter(st))
         body.append(cond_grid(ind, st.get("conditions")))
         body.append(verdict_html(st))
+        body.append(flow_line(st))
         cache = st.get("closes_cache") or []
         if len(cache) >= 2:
             body.append(sparkline_svg(cache))
@@ -1293,6 +1464,7 @@ def render_dashboard(config, state):
             ("@@LOW@@", str(low)), ("@@NEAR@@", str(near)), ("@@STALE@@", str(stale_n)),
             ("@@LASTRUN@@", htmlesc((state.get("last_run") or "-")[:16].replace("T", " "))),
             ("@@SECTIONS@@", "".join(secs)),
+            ("@@MARKET@@", market_section(state)),
             ("@@TIMELINE@@", "".join(rows) or '<tr><td colspan="5">暂无提醒记录</td></tr>')):
         html = html.replace(token, val)
     tmp = DASHBOARD_PATH + ".tmp"
@@ -1321,6 +1493,26 @@ border-bottom:1px solid var(--bord);padding-bottom:10px;margin-bottom:14px}
 h1{font-size:19px;margin:0}
 .sub{color:var(--muted);font-size:12px}
 .sub a{color:var(--line);text-decoration:none;font-weight:600}
+.flow{font-size:12px;margin-top:6px;font-weight:600}
+.flow .fl-date{float:right;color:var(--muted);font-weight:400;font-size:10.5px}
+.heatbox{background:var(--card);border:1px solid var(--bord);border-radius:12px;
+padding:14px;margin:12px 0}
+.heatbox h2{font-size:14.5px;margin-bottom:10px}
+.hsub{color:var(--muted);font-size:11px;font-weight:400;margin-left:8px}
+.hgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:4px;margin-bottom:6px}
+.hgrid.big{grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:6px}
+.hgrid.dn-row{margin-bottom:2px}
+.htile{border-radius:7px;padding:7px 4px 6px;text-align:center;color:#fff;
+overflow:hidden;line-height:1.3}
+.htile b{display:block;font-size:11px;font-weight:600;white-space:nowrap;
+overflow:hidden;text-overflow:ellipsis}
+.htile i{display:block;font-style:normal;font-size:13px;font-weight:700}
+.htile em{display:block;font-style:normal;font-size:10px;opacity:.85}
+.htile.big b{font-size:12px}.htile.big i{font-size:15px}
+.h-up{background:color-mix(in srgb,var(--up) calc(var(--a)*100%),var(--card))}
+.h-dn{background:color-mix(in srgb,var(--dn) calc(var(--a)*100%),var(--card))}
+.hgrid:not(.big) .htile{padding:5px 2px 4px}
+.hgrid:not(.big) .htile i{font-size:10.5px}
 .banner{background:var(--seri);color:#fff;padding:8px 12px;border-radius:8px;
 margin-bottom:12px;font-weight:600}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;
@@ -1389,6 +1581,7 @@ th{color:var(--ink2);font-weight:600}
 <div class="kpi"><b>@@STALE@@</b><span>数据异常</span></div>
 <div class="kpi"><b>@@LASTRUN@@</b><span>上次运行</span></div>
 </div>
+@@MARKET@@
 @@SECTIONS@@
 <section><h2>提醒时间线（最近20条）</h2>
 <table><tr><th>时间</th><th>资产</th><th>类型</th><th>现价</th><th>详情</th></tr>
@@ -1463,6 +1656,27 @@ def do_run(config, dry_run=False):
                 nears.append({"asset": asset, "rep": rep})
                 record_alert(state, asset, rep, "near", now)
             reports.append({"asset": asset, "rep": rep})
+            # 主力资金流(仅 A股上市: 指数/ETF/LOF；港美股与加密无此口径)
+            if asset["id"][:2] in ("sh", "sz"):
+                try:
+                    secid = ("1." if asset["id"].startswith("sh") else "0.") + asset["id"][2:]
+                    fl = fetch_eastmoney_flow(secid)
+                    if fl:
+                        # 按日积累(push2his 不通时快照只有当日1行)，多行则一次补全
+                        hist = st.setdefault("flow_hist", {})
+                        for r in fl:
+                            hist[r["date"]] = r["main"]
+                        if len(hist) > 20:
+                            for k in sorted(hist)[:-20]:
+                                del hist[k]
+                        last5 = sorted(hist)[-5:]
+                        st["flow"] = {"date": fl[-1]["date"],
+                                      "today": fl[-1]["main"], "today_pct": fl[-1]["main_pct"],
+                                      "d5": sum(hist[d] for d in last5),
+                                      "d5_days": len(last5)}
+                    time.sleep(0.15)
+                except Exception as e:
+                    log("%-14s 资金流获取失败(跳过): %s" % (asset["name"], str(e)[:80]))
             log("%-14s %10s %s 回撤%-6s RSI%-4s MA%-7s 分位%-5s%s" % (
                 asset["name"], fmt_price(live), fmt_pct(rep["chg_pct"], True),
                 fmt_pct(rep["indicators"]["dd"]), fmt_rsi(rep["indicators"]["rsi14"]),
@@ -1475,6 +1689,14 @@ def do_run(config, dry_run=False):
             log("%-14s 失败(%d): %s" % (asset.get("name"), st["consec_fails"], e))
             if st["consec_fails"] == 10:
                 stale_infos.append(asset.get("name"))
+
+    # 市场层：行业板块热力图（失败不影响主链路，state 保留上一版）
+    try:
+        inds = fetch_eastmoney_industries()
+        if inds:
+            state["market"] = {"industries": inds, "ts": iso(now)}
+    except Exception as e:
+        log("板块数据获取失败(沿用上一版): %s" % e)
 
     # 观察位(仅实时展示，无信号)
     for w in config.get("watch_assets", []):
@@ -1539,7 +1761,8 @@ def do_run(config, dry_run=False):
                 and now.hour >= config.get("digest_after_hour", 20)
                 and state.get("digest_date") != now.strftime("%Y-%m-%d")):
             t, b = compose_digest(reports, now,
-                                  link=(config.get("publish") or {}).get("url"))
+                                  link=(config.get("publish") or {}).get("url"),
+                                  market=(state.get("market") or {}).get("industries"))
             for n in notifiers:
                 if n.send(t, b):
                     state["digest_date"] = now.strftime("%Y-%m-%d")
